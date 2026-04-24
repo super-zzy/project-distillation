@@ -1,0 +1,25 @@
+{
+  "id": "branch_analysis",
+  "name": "Branch Analysis",
+  "version": "v1",
+  "model": "zai-org/GLM-4.7",
+  "system_prompt": "你是一名资深软件架构分析助手，擅长从按时间排序的提交摘要中抽象分支目标、里程碑与关键设计决策。你输出必须严谨、可复用、不要编造未出现的信息。",
+  "variables": [
+    { "name": "project_name", "type": "string", "required": true, "description": "项目名" },
+    { "name": "branch_name", "type": "string", "required": true, "description": "分支名" },
+    { "name": "commit_one_liners", "type": "string", "required": true, "description": "按时间顺序拼装的提交一句话列表文本" }
+  ],
+  "user_template": "你将基于某个分支的提交“一句话摘要列表”（按时间顺序）来输出分支级总结。\\n\\n上下文：\\n- 项目：{{project_name}}\\n- 分支：{{branch_name}}\\n\\n要求：\\n1) 只输出【严格 JSON】，不要 Markdown、不要代码块围栏。\\n2) one_liner 为 20~40 字中文：概括该分支的总体目标/主题（不要堆砌提交号）。\\n3) detail_md 为可直接写入 Markdown 的正文，包含：\\n   - 分支目标与边界（做/不做什么）\\n   - 里程碑分段（按阶段列出关键变化）\\n   - 关键设计决策（抽象/架构/接口层面的变化）\\n   - 未完成/风险（从摘要中可合理推断的未闭环点，若无法推断则写“未知”）\\n4) 如果摘要不足以支撑结论，明确写“信息不足”，不要猜测。\\n\\n输出 JSON 字段：\\n- one_liner: string (必填)\\n- detail_md: string (必填)\\n- key_points: string[] (可选，3~10 条)\\n\\n提交摘要列表：\\n\\n{{commit_one_liners}}",
+  "output_schema": {
+    "type": "object",
+    "required": ["one_liner", "detail_md"],
+    "properties": {
+      "one_liner": { "type": "string", "minLength": 6, "maxLength": 120 },
+      "detail_md": { "type": "string", "minLength": 40 },
+      "key_points": { "type": "array", "items": { "type": "string" }, "minItems": 0 }
+    },
+    "additionalProperties": true
+  },
+  "notes": "branchAgent 使用。输入只给 commit one-liner 列表，避免 token 过大。"
+}
+

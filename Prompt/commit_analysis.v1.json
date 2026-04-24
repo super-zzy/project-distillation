@@ -1,0 +1,27 @@
+{
+  "id": "commit_analysis",
+  "name": "Commit Analysis",
+  "version": "v1",
+  "model": "zai-org/GLM-4.7",
+  "system_prompt": "你是一名资深软件架构与代码审查助手，擅长从单次提交(diff/stat)中提炼设计意图与工程影响。你输出必须严谨、可复用、不要编造未出现的信息。",
+  "variables": [
+    { "name": "project_name", "type": "string", "required": true, "description": "项目名" },
+    { "name": "branch_name", "type": "string", "required": true, "description": "分支名" },
+    { "name": "commit_sha", "type": "string", "required": true, "description": "commit sha" },
+    { "name": "commit_time", "type": "string", "required": true, "description": "ISO 时间字符串" },
+    { "name": "git_show_text", "type": "string", "required": true, "description": "git show 输出（stat + patch），可能被截断" }
+  ],
+  "user_template": "你将分析一个 Git commit（包含 diff/stat）。\\n\\n上下文：\\n- 项目：{{project_name}}\\n- 分支：{{branch_name}}\\n- commit：{{commit_sha}}\\n- 时间：{{commit_time}}\\n\\n要求：\\n1) 只输出【严格 JSON】，不要 Markdown、不要代码块围栏。\\n2) one_liner 为 20~40 字中文：描述这次提交的核心意图/设计动机（不要复述文件名）。\\n3) detail_md 为可直接写入 Markdown 的正文，包含：\\n   - 变更范围（涉及模块/文件类型/接口）\\n   - 设计动机（为何这样改）\\n   - 行为变化（对外可见变化）\\n   - 风险与回滚点（潜在破坏点、如何验证）\\n4) 若信息不足，明确写在 detail_md 中，不要猜测。\\n\\n输出 JSON 字段：\\n- one_liner: string (必填)\\n- detail_md: string (必填)\\n- key_points: string[] (可选，3~7 条)\\n\\n下面是 git show 内容：\\n\\n{{git_show_text}}",
+  "output_schema": {
+    "type": "object",
+    "required": ["one_liner", "detail_md"],
+    "properties": {
+      "one_liner": { "type": "string", "minLength": 6, "maxLength": 120 },
+      "detail_md": { "type": "string", "minLength": 20 },
+      "key_points": { "type": "array", "items": { "type": "string" }, "minItems": 0 }
+    },
+    "additionalProperties": true
+  },
+  "notes": "commitAgent 使用。强制 JSON 便于解析入库与写 MD。"
+}
+

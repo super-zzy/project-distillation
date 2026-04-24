@@ -1,0 +1,18 @@
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Logs / local outputs
+logs/
+distilled/
+
