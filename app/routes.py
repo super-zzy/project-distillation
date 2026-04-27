@@ -6,12 +6,12 @@ import os
 import time
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask import Blueprint, Response, current_app, jsonify, request, stream_with_context
 
 from .db import db
-from .models import Project, Task, TaskEvent
+from .models import Project, SkillDraft, Task, TaskEvent
 from .utils import get_logger
-from .worker import emit, new_task_id
+from .worker import emit, ensure_task_runner, new_task_id
 
 api = Blueprint("api", __name__)
 log = get_logger("routes")
@@ -19,6 +19,64 @@ log = get_logger("routes")
 def _path_hash(p: str) -> str:
     norm = str(Path(p).resolve()).replace("\\", "/").lower()
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
+@api.post("/pick_folder")
+def pick_folder():
+    """
+    Open a native folder picker dialog on the server machine (local usage).
+
+    Note: Browsers cannot provide an absolute local path for security reasons.
+    Prefer platform-native pickers (macOS: osascript) and fall back to Tk if available.
+    """
+    try:
+        import sys
+
+        # macOS: use AppleScript to open a native folder picker without tkinter.
+        if sys.platform == "darwin":
+            import subprocess
+
+            script = 'POSIX path of (choose folder with prompt "选择本地 Git 项目目录（需包含 .git ）")'
+            cp = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if cp.returncode == 0:
+                return jsonify({"path": (cp.stdout or "").strip()})
+            # User cancelled => typically exit code 1, stderr contains "User canceled."
+            if "canceled" in (cp.stderr or "").lower():
+                return jsonify({"path": ""})
+            raise RuntimeError((cp.stderr or cp.stdout or "osascript failed").strip())
+
+        # Fallback: Tk folder picker (requires _tkinter).
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            root.attributes("-topmost", True)
+        except Exception:  # noqa: BLE001
+            pass
+        path = filedialog.askdirectory(title="选择本地 Git 项目目录（需包含 .git）")
+        try:
+            root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+
+        return jsonify({"path": (path or "").strip()})
+    except Exception as e:  # noqa: BLE001
+        log.exception("pick_folder failed: %s", e)
+        return (
+            jsonify(
+                {
+                    "error": "folder picker unavailable. On macOS it requires `osascript`; otherwise it may require tkinter.",
+                    "detail": str(e),
+                }
+            ),
+            500,
+        )
 
 
 @api.get("/tasks/active")
@@ -130,6 +188,9 @@ def analyze_project():
     db.session.commit()
     emit(task_id, f"创建任务：{task_id}", data={"project": project.name, "path": project.local_path})
     log.info("created task id=%s project_id=%s", task_id, project.id)
+
+    # Ensure the task is picked up even if global worker loop is idle.
+    ensure_task_runner(current_app._get_current_object(), task_id)
 
     return jsonify({"task_id": task_id, "project": {"id": project.id, "name": project.name}})
 
@@ -285,6 +346,104 @@ def sse_progress(task_id: str):
             time.sleep(0.8)
 
     return Response(stream_with_context(gen()), mimetype="text/event-stream")
+
+
+@api.get("/skill/latest")
+def get_latest_skill():
+    project_id = request.args.get("project_id", type=int)
+    if not project_id:
+        return jsonify({"error": "project_id required"}), 400
+    sd = SkillDraft.query.filter_by(project_id=project_id).order_by(SkillDraft.version.desc(), SkillDraft.id.desc()).first()
+    if not sd:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(
+        {
+            "id": sd.id,
+            "project_id": sd.project_id,
+            "task_id": sd.task_id,
+            "version": sd.version,
+            "content_md": sd.content_md,
+            "md_path": sd.md_path,
+            "created_at": sd.created_at.isoformat() if sd.created_at else None,
+        }
+    )
+
+
+@api.post("/skill/iterate")
+def iterate_skill():
+    data = request.get_json(force=True, silent=True) or {}
+    project_id = data.get("project_id")
+    feedback = (data.get("feedback") or "").strip()
+    task_id = (data.get("task_id") or "").strip() or None
+    if not project_id:
+        return jsonify({"error": "project_id required"}), 400
+    if not feedback:
+        return jsonify({"error": "feedback required"}), 400
+
+    sd = SkillDraft.query.filter_by(project_id=int(project_id)).order_by(SkillDraft.version.desc(), SkillDraft.id.desc()).first()
+    if not sd:
+        return jsonify({"error": "no skill draft found; run analyze first"}), 404
+
+    # Emit via task stream if available, so the homepage UI can see it.
+    if task_id:
+        emit(task_id, f"skillAgent：收到反馈，开始迭代（基于 v{sd.version}）")
+
+    try:
+        from .ai_client import AiClient
+
+        system = "你是 Cursor Skill 的编辑器。你会根据用户反馈对 SKILL.md 做增量改写：保持结构清晰、步骤可执行、不要编造项目不存在的命令/文件。只输出 Markdown 正文，不要代码块围栏。"
+        user = (
+            "这是当前的 SKILL.md：\n\n"
+            f"{sd.content_md}\n\n"
+            "用户反馈/新要求：\n"
+            f"{feedback}\n\n"
+            "请输出更新后的完整 SKILL.md（覆盖式输出）。"
+        )
+        ai = AiClient()
+        new_text = ai.chat(
+            system=system,
+            user=user,
+            meta={
+                "task_id": task_id,
+                "project_id": int(project_id),
+                "agent": "skill",
+                "prompt_id": "skill_iterate.v1",
+            },
+        )
+
+        version = (db.session.query(db.func.max(SkillDraft.version)).filter(SkillDraft.project_id == int(project_id)).scalar() or 0) + 1
+        new_sd = SkillDraft(
+            task_id=task_id,
+            project_id=int(project_id),
+            version=int(version),
+            content_md=new_text,
+            md_path=sd.md_path,
+        )
+        db.session.add(new_sd)
+        db.session.commit()
+
+        # Best-effort overwrite the same SKILL.md file if path known.
+        if sd.md_path:
+            from pathlib import Path
+
+            Path(sd.md_path).write_text(new_text.strip() + "\n", encoding="utf-8")
+
+        if task_id:
+            emit(task_id, f"skillAgent：迭代完成，已生成 v{new_sd.version}")
+
+        return jsonify(
+            {
+                "ok": True,
+                "version": new_sd.version,
+                "content_md": new_sd.content_md,
+                "md_path": new_sd.md_path,
+            }
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("iterate_skill failed: %s", e)
+        if task_id:
+            emit(task_id, f"skillAgent：迭代失败：{e}", level="error")
+        return jsonify({"error": str(e)}), 500
 
 
 def _sse(event: str, data: dict, event_id: int | None = None) -> str:

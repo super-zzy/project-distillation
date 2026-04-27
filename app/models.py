@@ -147,3 +147,21 @@ class AiCall(db.Model):
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
 
+
+class SkillDraft(db.Model):
+    __tablename__ = "skill_drafts"
+
+    id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
+    task_id = db.Column(db.String(64), db.ForeignKey("tasks.id"), nullable=True, index=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("projects.id"), nullable=False, index=True)
+
+    version = db.Column(db.Integer, nullable=False, default=1)
+    content_md = db.Column(db.Text, nullable=False)
+    md_path = db.Column(db.Text, nullable=True)
+
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    __table_args__ = (
+        db.Index("ix_skill_project_version", "project_id", "version"),
+    )
+

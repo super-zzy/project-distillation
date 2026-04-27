@@ -75,6 +75,8 @@ def home():
       button:disabled{ opacity:.45; cursor:not-allowed; }
       .btn-primary{ border-color: rgba(124,92,255,.55); background: rgba(124,92,255,.18); }
       .btn-primary:hover{ background: rgba(124,92,255,.24); }
+      .btn-accent2{ border-color: rgba(34,211,238,.50); background: rgba(34,211,238,.12); }
+      .btn-accent2:hover{ background: rgba(34,211,238,.18); }
       .statusbar{
         display:flex; flex-wrap:wrap; gap:10px; align-items:center;
         border: 1px solid var(--stroke);
@@ -108,13 +110,14 @@ def home():
         <span class="badge">Phase-1 • Multi-Agent • SSE</span>
       </div>
       <div class="panel">
-        <div class="muted">输入本地 Git 项目路径（目录必须包含 `.git`）。不填则使用 `.env` 的 `PROJECT_PATH`。</div>
+        <div class="muted">点击按钮选择本地 Git 项目目录（必须包含 `.git`）。不选则使用 `.env` 的 `PROJECT_PATH`。</div>
         <div class="row" style="margin-top:10px;">
-          <input id="path" placeholder="D:/path/to/repo" />
+          <button class="btn-accent2" id="pick">选择文件夹</button>
           <button class="btn-primary" id="start">启动</button>
           <button id="pause" disabled>暂停</button>
           <button id="resume" disabled>恢复</button>
         </div>
+        <div class="muted" style="margin-top:8px;">已选择：<span class="v" id="pickedPath">(none)</span></div>
         <div class="statusbar" style="margin-top:10px;">
           <div class="kv"><span class="k">task</span><span class="v" id="task">(none)</span></div>
           <div class="kv"><span class="k">status</span><span class="v pill" id="st">(unknown)</span></div>
@@ -133,11 +136,14 @@ def home():
       const opEl = document.getElementById('op');
       const pgEl = document.getElementById('pg');
       const startBtn = document.getElementById('start');
+      const pickBtn = document.getElementById('pick');
       const pauseBtn = document.getElementById('pause');
       const resumeBtn = document.getElementById('resume');
+      const pickedPathEl = document.getElementById('pickedPath');
       let taskId = null;
       let lastId = 0;
       let es = null;
+      let pickedPath = '';
 
       function loadState() {
         try {
@@ -226,10 +232,38 @@ def home():
         connect();
       }
 
+      pickBtn.onclick = async () => {
+        pickBtn.disabled = true;
+        pickBtn.textContent = '选择中...';
+        try {
+          const resp = await fetch('/api/pick_folder', { method: 'POST' });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) {
+            log('ERROR: ' + (data.error || JSON.stringify(data)));
+            return;
+          }
+          const path = (data.path || '').trim();
+          if (path) {
+            pickedPath = path;
+            pickedPathEl.textContent = path;
+            log('已选择：' + path);
+          } else {
+            pickedPath = '';
+            pickedPathEl.textContent = '(none)';
+            log('未选择目录。');
+          }
+        } catch (e) {
+          log('ERROR: ' + String(e));
+        } finally {
+          pickBtn.disabled = false;
+          pickBtn.textContent = '选择文件夹';
+        }
+      };
+
       startBtn.onclick = async () => {
         logEl.textContent = '';
         lastId = 0;
-        const project_path = document.getElementById('path').value.trim();
+        const project_path = (pickedPath || '').trim();
         const body = project_path ? { project_path } : {};
         const resp = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         const data = await resp.json();

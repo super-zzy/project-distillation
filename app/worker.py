@@ -19,12 +19,14 @@ from .md_writer import (
     commit_md_path,
     ensure_project_structure,
     project_root,
+    skill_md_path,
     summary_md_path,
     write_branch_md,
     write_commit_md,
+    write_skill_md,
     write_summary_md,
 )
-from .models import Branch, Commit, Project, Task, TaskEvent
+from .models import Branch, Commit, Project, SkillDraft, Task, TaskEvent
 from .utils import get_logger
 
 
@@ -32,6 +34,8 @@ _worker_lock = threading.Lock()
 _worker_started = False
 log = get_logger("worker")
 _worker_app: Optional[Flask] = None
+_task_runners_lock = threading.Lock()
+_task_runners: dict[str, threading.Thread] = {}
 
 
 def _ai_chat_with_heartbeat(*, task: Task, every_s: float = 5.0, label: str, call):
@@ -74,6 +78,69 @@ def ensure_worker_started(app: Flask) -> None:
         _worker_started = True
         log.info("worker started")
 
+
+def ensure_task_runner(app: Flask, task_id: str) -> None:
+    """
+    Start a dedicated background runner for a specific task.
+
+    This is a safety net in case the global worker loop cannot pick up tasks
+    (e.g. environment/threading quirks). It is idempotent per task_id.
+    """
+    with _task_runners_lock:
+        t = _task_runners.get(task_id)
+        if t and t.is_alive():
+            return
+        nt = threading.Thread(target=_run_task_until_done, args=(app, task_id), daemon=True)
+        _task_runners[task_id] = nt
+        nt.start()
+
+
+def _run_task_until_done(app: Flask, task_id: str) -> None:
+    with app.app_context():
+        log.info("task runner started task=%s", task_id)
+        while True:
+            task = Task.query.get(task_id)
+            if not task:
+                log.warning("task runner exit: task not found task=%s", task_id)
+                return
+
+            if task.status in ("completed", "failed", "stopped"):
+                log.info("task runner exit: status=%s task=%s", task.status, task_id)
+                return
+
+            if task.status == "queued":
+                _set_task(task, status="running", message="任务开始", phase="main")
+                emit(task.id, "任务开始")
+
+            if task.status == "paused":
+                time.sleep(0.8)
+                continue
+
+            try:
+                if task.phase == "main":
+                    _run_main_agent(task)
+                elif task.phase == "commit":
+                    _run_commit_agents(task)
+                elif task.phase == "branch":
+                    _run_branch_agents(task)
+                elif task.phase == "summary":
+                    _run_summary_agent(task)
+                else:
+                    _set_task(task, status="failed", error=f"Unknown phase: {task.phase}")
+                    emit(task.id, f"Unknown phase: {task.phase}", level="error")
+                    return
+            except Exception as e:  # noqa: BLE001
+                try:
+                    db.session.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                _set_task(task, status="failed", error=str(e))
+                emit(task.id, f"任务失败：{e}", level="error")
+                log.exception("task runner failed task=%s err=%s", task_id, e)
+                return
+
+            # Yield to avoid tight looping; phase handlers are already paced.
+            time.sleep(0.2)
 
 def new_task_id() -> str:
     return uuid.uuid4().hex
@@ -458,16 +525,14 @@ def _run_summary_agent(task: Task) -> None:
             else:
                 lines.append(f"- {b.name}: (no summary)")
 
-        system = "你是一个资深软件架构师，擅长从多分支演进中提炼整体设计思路与关键时间节点。输出要可读、结构化。"
-        user = (
-            f"下面是项目 `{project.name}` 各分支的一句话概括。\n\n"
-            "请输出：\n"
-            "1) 项目整体设计思路（核心模块/边界/关键抽象）\n"
-            "2) 关键时间节点/里程碑（根据提交演进推断）\n"
-            "3) 风格与工程实践（如测试、CI、目录结构、模块化方式）\n"
-            "4) 可沉淀成 skill 的开发策略（面向长期编码）\n\n"
-            "分支列表：\n"
-            + "\n".join(lines)
+        prompt = _load_prompt_json("Prompt/project_summary.v1.json")
+        system = str(prompt.get("system_prompt") or "")
+        user = _render_template(
+            str(prompt.get("user_template") or ""),
+            {
+                "project_name": project.name,
+                "branch_one_liners": "\n".join(lines),
+            },
         )
 
         ai = AiClient()
@@ -486,8 +551,54 @@ def _run_summary_agent(task: Task) -> None:
             ),
         )
 
+        out = _parse_strict_json(resp)
+        one_liner = str(out.get("one_liner") or "（无）").strip()[:120] or "（无）"
+        detail_md = str(out.get("detail_md") or "").strip() or "（无）"
+
         mdp = summary_md_path(output_root)
-        write_summary_md(mdp, resp)
+        write_summary_md(mdp, one_liner=one_liner, detail_md=detail_md)
+
+        # Generate an initial Cursor Skill draft (SKILL.md) and persist it for iteration.
+        emit(task.id, "summaryAgent：生成 Cursor Skill 初稿（SKILL.md）")
+        skill_prompt = _load_prompt_json("Prompt/skill_distill.v1.json")
+        skill_system = str(skill_prompt.get("system_prompt") or "")
+        skill_user = _render_template(
+            str(skill_prompt.get("user_template") or ""),
+            {
+                "project_name": project.name,
+                "project_one_liner": one_liner,
+                "project_detail_md": detail_md,
+                "branch_one_liners": "\n".join(lines),
+            },
+        )
+        skill_text = _ai_chat_with_heartbeat(
+            task=task,
+            label="skillAgent：AI生成 SKILL.md",
+            call=lambda: ai.chat(
+                system=skill_system,
+                user=skill_user,
+                meta={
+                    "task_id": task.id,
+                    "project_id": project.id,
+                    "agent": "skill",
+                    "prompt_id": "Prompt/skill_distill.v1.json",
+                },
+            ),
+        )
+        skill_path = skill_md_path(output_root)
+        write_skill_md(skill_path, skill_text)
+
+        version = (db.session.query(db.func.max(SkillDraft.version)).filter(SkillDraft.project_id == project.id).scalar() or 0) + 1
+        sd = SkillDraft(
+            task_id=task.id,
+            project_id=project.id,
+            version=int(version),
+            content_md=skill_text,
+            md_path=str(skill_path),
+        )
+        db.session.add(sd)
+        db.session.commit()
+        emit(task.id, f"Skill 初稿已生成：v{sd.version}（{skill_path}）")
 
         _set_task(task, status="completed", message="完成", progress_current=1, progress_total=1)
         emit(task.id, "任务完成")
@@ -497,6 +608,42 @@ def _run_summary_agent(task: Task) -> None:
         _set_task(task, status="failed", error=str(e))
         emit(task.id, f"summary 失败：{e}", level="error")
         log.exception("summaryAgent failed task=%s err=%s", task.id, e)
+
+
+def _load_prompt_json(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _render_template(tpl: str, vars: dict) -> str:
+    # Minimal moustache-like renderer for Prompt/*.json templates.
+    out = tpl
+    for k, v in vars.items():
+        out = out.replace("{{" + str(k) + "}}", str(v))
+    return out
+
+
+def _parse_strict_json(text: str) -> dict:
+    """
+    Parse model output that SHOULD be strict JSON.
+    Best-effort: if it contains extra text, try to extract the first top-level JSON object.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    # Extract first {...} block.
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(raw[start : end + 1])
+        except Exception:
+            return {}
+    return {}
 
 
 def _split_one_liner(ai_text: str) -> tuple[str, str]:

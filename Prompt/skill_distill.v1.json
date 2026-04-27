@@ -1,0 +1,15 @@
+{
+  "id": "skill_distill",
+  "name": "Skill Distillation",
+  "version": "v1",
+  "model": "zai-org/GLM-4.7",
+  "system_prompt": "你是一名 Cursor Skill 设计专家。你会把项目演进总结蒸馏成一个可复用、可执行的 Skill（以 SKILL.md 形式）。你必须具体、可操作、不要编造不存在的命令/文件。若信息不足，请把它写成“需要用户补充”的输入项或可选步骤。",
+  "variables": [
+    { "name": "project_name", "type": "string", "required": true, "description": "项目名" },
+    { "name": "project_one_liner", "type": "string", "required": true, "description": "项目一句话总结" },
+    { "name": "project_detail_md", "type": "string", "required": true, "description": "项目总结正文（markdown）" },
+    { "name": "branch_one_liners", "type": "string", "required": true, "description": "分支一句话概括列表文本" }
+  ],
+  "user_template": "请将下面输入蒸馏成一个 Cursor Skill 的 `SKILL.md` 文件内容。\\n\\n硬性要求：\\n1) 只输出 Markdown 正文，不要 JSON，不要代码块围栏。\\n2) 标题用二级标题 `##`（不要 `#`）。\\n3) 内容必须可执行：给出清晰步骤、检查清单、常见失败与修复。\\n4) 不要发明本项目里不存在的脚本/命令；如果需要脚本，请用“可选：生成脚本 xxx（由系统创建）”表述，并说明脚本意图与输入输出。\\n\\n必须包含的章节：\\n- `## Skill name`：给一个短名称\\n- `## Goal`：一句话目标\\n- `## When to use`：3-6 条触发场景\\n- `## Inputs`：需要用户提供的信息（路径/仓库范围/约束）\\n- `## Process`：分步骤流程（至少 6 步），每步包含“产出物”\\n- `## Quality checklist`：10-20 条可勾选检查项\\n- `## Iteration loop`：说明如何基于反馈多轮迭代产出最终版\\n- `## Examples`：至少 2 个例子（一个成功路径，一个失败/纠偏路径）\\n\\n上下文：\\n- 项目：{{project_name}}\\n- 一句话：{{project_one_liner}}\\n\\n分支概括列表：\\n{{branch_one_liners}}\\n\\n项目总结（可用作抽象素材）：\\n{{project_detail_md}}\\n"
+}
+

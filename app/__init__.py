@@ -21,8 +21,13 @@ def create_app() -> Flask:
     mysql_port = _env("MYSQL_PORT", "3306")
     mysql_db = _env("MYSQL_DATABASE", "project_distillation")
 
+    # Password may contain special characters like '@' which must be URL-encoded.
+    from urllib.parse import quote_plus
+
+    mysql_password_escaped = quote_plus(mysql_password)
+
     app.config["SQLALCHEMY_DATABASE_URI"] = (
-        f"mysql+pymysql://{mysql_user}:{mysql_password}@{mysql_host}:{mysql_port}/{mysql_db}"
+        f"mysql+pymysql://{mysql_user}:{mysql_password_escaped}@{mysql_host}:{mysql_port}/{mysql_db}"
         "?charset=utf8mb4"
     )
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False

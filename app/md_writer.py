@@ -16,6 +16,7 @@ def ensure_project_structure(root: Path) -> None:
     (root / "01_commit").mkdir(parents=True, exist_ok=True)
     (root / "02_branch").mkdir(parents=True, exist_ok=True)
     (root / "03_summary").mkdir(parents=True, exist_ok=True)
+    (root / "04_skill").mkdir(parents=True, exist_ok=True)
 
     readme = root / "00_索引与模板" / "README.md"
     if not readme.exists():
@@ -41,6 +42,9 @@ def branch_md_path(root: Path, branch_name: str) -> Path:
 def summary_md_path(root: Path) -> Path:
     return root / "03_summary" / "summary.md"
 
+def skill_md_path(root: Path) -> Path:
+    return root / "04_skill" / "SKILL.md"
+
 
 def write_commit_md(path: Path, header_one_liner: str, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -58,7 +62,15 @@ def write_branch_md(path: Path, header_one_liner: str, body: str) -> None:
     )
 
 
-def write_summary_md(path: Path, body: str) -> None:
+def write_summary_md(path: Path, *, one_liner: str, detail_md: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
+    path.write_text(
+        f"# 项目总结\n\n**一句话**：{one_liner}\n\n{detail_md.strip()}\n",
+        encoding="utf-8",
+    )
+
+
+def write_skill_md(path: Path, body: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body.strip() + "\n", encoding="utf-8")
 
